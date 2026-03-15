@@ -222,8 +222,8 @@ export default function CommunityPage () {
       <div className="min-h-screen flex flex-col items-center justify-center gap-6 px-4 py-12">
         <div className="absolute top-4 right-4"><ThemeSwitcher /></div>
         {community.logo
-          ? <img src={community.logo} alt={community.name} className="h-16 w-16 object-contain" />
-          : <div className="text-5xl">{community.emoji}</div>
+          ? <img src={community.logo} alt={community.name} className="h-32 w-32 object-contain" />
+          : community.emoji ? <div className="text-5xl">{community.emoji}</div> : null
         }
         <p className="text-xs uppercase tracking-[3px] text-primary font-medium">{community.tagline}</p>
         <h1 className="text-3xl font-semibold tracking-tight">{community.name}</h1>
