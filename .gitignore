@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.local
+*.key
+keys/
+dist/
+coverage/
+.beads/
+.next/
+dashboard/node_modules/
+dashboard/.next/

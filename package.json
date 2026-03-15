@@ -1,0 +1,50 @@
+{
+  "name": "hyperviking",
+  "version": "0.4.0",
+  "description": "A shared brain for AI agents. Encrypted P2P knowledge base with RBAC, audit logging, and rate limiting.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "hv": "./dist/cli.js",
+    "hyperviking": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/server.js",
+    "test": "node --test test/",
+    "mcp": "node dist/mcp.js"
+  },
+  "keywords": [
+    "openviking",
+    "hyperswarm",
+    "p2p",
+    "encrypted",
+    "mcp",
+    "ai-agents",
+    "knowledge-base",
+    "context-database"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "b4a": "^1.6.0",
+    "compact-encoding": "^2.0.0",
+    "hyperdht": "^6.0.0",
+    "hyperswarm": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "SKILL.md",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@types/b4a": "^1.6.5",
+    "@types/compact-encoding": "^2.15.0",
+    "@types/node": "^25.5.0",
+    "typescript": "^5.9.3"
+  }
+}

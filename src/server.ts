@@ -1,0 +1,425 @@
+import Hyperswarm from 'hyperswarm'
+import type { Duplex } from 'node:stream'
+import { watch, type FSWatcher } from 'node:fs'
+import b4a from 'b4a'
+import { Decoder, response, error as rpcError } from './protocol.js'
+import { getOrCreateKeypair, loadAllowlist } from './keys.js'
+import { loadRoleList, saveRoleList, getMember, addMember, removeMember, updateRole, listMembers, isAllowed } from './roles.js'
+import { AuditLog } from './audit.js'
+import { RateLimiter } from './ratelimit.js'
+import type { Role, RoleList, Member } from './roles.js'
+import type { AuditEntry } from './audit.js'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+
+const HV_DIR = join(homedir(), '.hyperviking')
+const ALLOWLIST_PATH = join(HV_DIR, 'allowlist.json')
+const MEMBERS_PATH = join(HV_DIR, 'members.json')
+const AUDIT_PATH = join(HV_DIR, 'audit.jsonl')
+
+// ── Options ──
+
+export interface RolesConfig {
+  path?: string
+  auditPath?: string
+  rateLimits?: Partial<Record<Role, number>>
+  rateWindowMs?: number
+}
+
+export interface ServerOptions {
+  name?: string
+  openVikingUrl?: string
+  allowlistPath?: string
+  /** Enable RBAC mode. When provided, replaces the simple allowlist with role-based access control. */
+  roles?: RolesConfig
+  onConnection?: (conn: Duplex, info: { publicKey: Buffer; member?: Member | null }) => void
+  onError?: (err: Error) => void
+}
+
+export interface HyperVikingServer {
+  swarm: Hyperswarm
+  publicKey: Buffer
+  publicKeyHex: string
+  connections: Set<Duplex>
+  /** Present in RBAC mode */
+  roleList?: RoleList
+  /** Present in RBAC mode */
+  audit?: AuditLog
+  /** Reload role list from disk (RBAC mode only) */
+  reloadRoleList?: () => void
+  close: () => Promise<void>
+}
+
+interface RpcRequest {
+  id: number
+  method: string
+  params: Record<string, unknown>
+}
+
+export async function createServer (opts: ServerOptions = {}): Promise<HyperVikingServer> {
+  const {
+    name = 'server',
+    openVikingUrl = 'http://127.0.0.1:1933',
+    allowlistPath = ALLOWLIST_PATH,
+    roles: rolesConfig,
+    onConnection,
+    onError
+  } = opts
+
+  const keyPair = getOrCreateKeypair(name)
+  const useRbac = !!rolesConfig
+
+  // ── Access control setup ──
+  let roleList: RoleList | undefined
+  let audit: AuditLog | undefined
+  let limiter: RateLimiter | undefined
+  let allowlist: Set<string> | null = null
+  let fileWatcher: FSWatcher | null = null
+  let reloadDebounce: ReturnType<typeof setTimeout> | null = null
+  let cleanupInterval: ReturnType<typeof setInterval> | undefined
+
+  const roleListPath = rolesConfig?.path ?? MEMBERS_PATH
+  const auditLogPath = rolesConfig?.auditPath ?? AUDIT_PATH
+
+  if (useRbac) {
+    roleList = loadRoleList(roleListPath)
+    audit = new AuditLog(auditLogPath)
+    limiter = new RateLimiter(rolesConfig?.rateLimits, rolesConfig?.rateWindowMs)
+
+    // Watch members.json for hot-reload
+    try {
+      fileWatcher = watch(roleListPath, () => {
+        if (reloadDebounce) clearTimeout(reloadDebounce)
+        reloadDebounce = setTimeout(() => {
+          try {
+            const updated = loadRoleList(roleListPath)
+            const oldCount = Object.keys(roleList!.members).length
+            roleList = updated
+            const newCount = Object.keys(roleList!.members).length
+            if (oldCount !== newCount) {
+              console.log(`[hyperviking] role-list reloaded: ${newCount} members (was ${oldCount})`)
+            }
+          } catch (err) {
+            console.error(`[hyperviking] failed to reload role-list:`, (err as Error).message)
+          }
+        }, 500)
+      })
+    } catch {
+      // file watching not available
+    }
+
+    cleanupInterval = setInterval(() => limiter!.cleanup(), 60_000)
+  } else {
+    allowlist = loadAllowlist(allowlistPath)
+  }
+
+  // ── Swarm ──
+
+  const swarm = new Hyperswarm({
+    keyPair,
+    firewall: (remotePublicKey: Buffer) => {
+      const hex = b4a.toString(remotePublicKey, 'hex')
+      if (useRbac) {
+        return !roleList!.members[hex] // reject if not a member
+      }
+      if (!allowlist) return false // no allowlist = allow all
+      return !allowlist.has(hex)   // reject if not in allowlist
+    }
+  })
+
+  const connections = new Set<Duplex>()
+
+  swarm.on('connection', (conn: Duplex, info: { publicKey: Buffer }) => {
+    const remoteKey = b4a.toString(info.publicKey, 'hex')
+    const member = useRbac ? getMember(roleList!, remoteKey) : null
+    const peerName = member?.name ?? remoteKey.slice(0, 12)
+
+    console.log(`[hyperviking] peer connected: ${peerName} (${remoteKey.slice(0, 12)}...)${member ? ` role=${member.role}` : ''}`)
+    connections.add(conn)
+
+    const decoder = new Decoder()
+
+    conn.on('data', async (chunk: Buffer) => {
+      decoder.push(chunk)
+      for (const msg of decoder.drain()) {
+        const req = msg as RpcRequest
+
+        // ── RBAC mode: full middleware stack ──
+        if (useRbac) {
+          const entry: AuditEntry = {
+            timestamp: new Date().toISOString(),
+            peer: remoteKey.slice(0, 12),
+            peerName: member?.name ?? 'unknown',
+            role: member?.role ?? 'none',
+            method: req.method,
+            status: 'allowed'
+          }
+
+          try {
+            if (!member) {
+              entry.status = 'denied'
+              entry.error = 'not a member'
+              audit!.log(entry)
+              conn.write(rpcError(req.id, -32001, 'Access denied: not a member'))
+              continue
+            }
+
+            if (!limiter!.check(remoteKey, member.role)) {
+              entry.status = 'rate-limited'
+              audit!.log(entry)
+              conn.write(rpcError(req.id, -32002, 'Rate limit exceeded'))
+              continue
+            }
+
+            if (!isAllowed(member.role, req.method)) {
+              entry.status = 'denied'
+              entry.error = `role '${member.role}' cannot call '${req.method}'`
+              audit!.log(entry)
+              conn.write(rpcError(req.id, -32003, `Permission denied: ${member.role} cannot call ${req.method}`))
+              continue
+            }
+
+            // Handle member management methods
+            if (req.method.startsWith('hv.')) {
+              const result = handleHvMethod(req, remoteKey, member, roleList!, roleListPath, audit!)
+              audit!.log(entry)
+              conn.write(response(req.id, result))
+              continue
+            }
+
+            // Proxy to OpenViking
+            const result = await proxyToOpenViking(req, openVikingUrl)
+            audit!.log(entry)
+            conn.write(response(req.id, result))
+          } catch (err) {
+            entry.status = 'error'
+            entry.error = (err as Error).message
+            audit!.log(entry)
+            console.error(`[hyperviking] request error:`, (err as Error).message)
+            conn.write(rpcError(req.id, -32000, (err as Error).message))
+          }
+        } else {
+          // ── Simple mode: direct proxy ──
+          try {
+            const result = await proxyToOpenViking(req, openVikingUrl)
+            conn.write(response(req.id, result))
+          } catch (err) {
+            console.error(`[hyperviking] request error:`, (err as Error).message)
+            conn.write(rpcError(req.id, -32000, (err as Error).message))
+          }
+        }
+      }
+    })
+
+    conn.on('close', () => {
+      console.log(`[hyperviking] peer disconnected: ${peerName} (${remoteKey.slice(0, 12)}...)`)
+      connections.delete(conn)
+    })
+
+    conn.on('error', (err: Error) => {
+      console.error(`[hyperviking] connection error:`, err.message)
+      connections.delete(conn)
+      if (onError) onError(err)
+    })
+
+    if (onConnection) onConnection(conn, { publicKey: info.publicKey, member })
+  })
+
+  // Join a topic derived from the server's public key so clients can find us
+  const topic = b4a.allocUnsafe(32) as Buffer
+  b4a.copy(keyPair.publicKey, topic, 0, 0, 32)
+
+  const discovery = swarm.join(topic, { server: true, client: false })
+  await discovery.flushed()
+
+  const pubKeyHex = b4a.toString(keyPair.publicKey, 'hex')
+  console.log(`[hyperviking] server listening`)
+  console.log(`[hyperviking] public key: ${pubKeyHex}`)
+  console.log(`[hyperviking] proxying to: ${openVikingUrl}`)
+  if (useRbac) {
+    console.log(`[hyperviking] mode: RBAC (${Object.keys(roleList!.members).length} members)`)
+  } else if (allowlist) {
+    console.log(`[hyperviking] mode: allowlist (${allowlist.size} keys)`)
+  } else {
+    console.log(`[hyperviking] mode: open (all peers accepted)`)
+  }
+
+  return {
+    swarm,
+    publicKey: keyPair.publicKey,
+    publicKeyHex: pubKeyHex,
+    connections,
+    ...(useRbac ? {
+      roleList,
+      audit,
+      reloadRoleList () {
+        roleList = loadRoleList(roleListPath)
+      }
+    } : {}),
+    async close () {
+      if (cleanupInterval) clearInterval(cleanupInterval)
+      if (reloadDebounce) clearTimeout(reloadDebounce)
+      if (fileWatcher) fileWatcher.close()
+      for (const conn of connections) conn.destroy()
+      await swarm.destroy()
+    }
+  }
+}
+
+// ── Member management RPC methods (RBAC mode) ──
+
+function handleHvMethod (
+  req: RpcRequest,
+  callerKey: string,
+  caller: Member,
+  roleList: RoleList,
+  roleListPath: string,
+  audit: AuditLog
+): unknown {
+  switch (req.method) {
+    case 'hv.whoami':
+      return {
+        pubkey: callerKey,
+        name: caller.name,
+        role: caller.role,
+        eth: caller.eth
+      }
+
+    case 'hv.members':
+      return { members: listMembers(roleList) }
+
+    case 'hv.add-member': {
+      const { pubkey, role, name, eth } = req.params as {
+        pubkey: string; role: Role; name: string; eth?: string
+      }
+      if (!pubkey || !role || !name) {
+        throw new Error('Missing required params: pubkey, role, name')
+      }
+      if (!['reader', 'contributor', 'admin'].includes(role)) {
+        throw new Error('Invalid role. Must be: reader, contributor, or admin')
+      }
+      addMember(roleList, pubkey, {
+        role,
+        name,
+        eth,
+        addedAt: new Date().toISOString(),
+        addedBy: callerKey.slice(0, 12)
+      })
+      saveRoleList(roleListPath, roleList)
+      return { ok: true, member: getMember(roleList, pubkey) }
+    }
+
+    case 'hv.remove-member': {
+      const { pubkey } = req.params as { pubkey: string }
+      if (!pubkey) throw new Error('Missing required param: pubkey')
+      if (pubkey === callerKey) throw new Error('Cannot remove yourself')
+      const removed = removeMember(roleList, pubkey)
+      if (!removed) throw new Error('Member not found')
+      saveRoleList(roleListPath, roleList)
+      return { ok: true }
+    }
+
+    case 'hv.update-role': {
+      const { pubkey, role } = req.params as { pubkey: string; role: Role }
+      if (!pubkey || !role) throw new Error('Missing required params: pubkey, role')
+      if (!['reader', 'contributor', 'admin'].includes(role)) {
+        throw new Error('Invalid role. Must be: reader, contributor, or admin')
+      }
+      const updated = updateRole(roleList, pubkey, role)
+      if (!updated) throw new Error('Member not found')
+      saveRoleList(roleListPath, roleList)
+      return { ok: true, member: getMember(roleList, pubkey) }
+    }
+
+    case 'hv.audit': {
+      const count = (req.params.count as number) || 100
+      return { entries: audit.tail(count) }
+    }
+
+    default:
+      throw new Error(`Unknown method: ${req.method}`)
+  }
+}
+
+// ── OpenViking proxy ──
+
+async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unknown> {
+  const { method, params } = req
+
+  function qs (obj: Record<string, unknown>): string {
+    const entries = Object.entries(obj).filter(([, v]) => v != null)
+    return entries.length ? '?' + new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString() : ''
+  }
+
+  const routes: Record<string, () => Promise<Response>> = {
+    'ov.health': () => fetch(`${baseUrl}/health`),
+    'ov.ls': () => fetch(`${baseUrl}/api/v1/fs/ls${qs({ uri: (params.uri as string) || 'viking://', limit: (params.limit as number) || 256 })}`),
+    'ov.find': () => fetch(`${baseUrl}/api/v1/search/find`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: params.query, uri: params.uri, limit: (params.limit as number) || 10 })
+    }),
+    'ov.read': () => fetch(`${baseUrl}/api/v1/content/read${qs({ uri: params.uri })}`),
+    'ov.overview': () => fetch(`${baseUrl}/api/v1/content/overview${qs({ uri: params.uri })}`),
+    'ov.status': () => fetch(`${baseUrl}/api/v1/system/status`),
+    'ov.add-resource': () => fetch(`${baseUrl}/api/v1/resources`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: params.path, target: params.target })
+    }),
+    'ov.grep': () => fetch(`${baseUrl}/api/v1/search/grep`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    }),
+    'ov.glob': () => fetch(`${baseUrl}/api/v1/search/glob`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    }),
+    'ov.abstract': () => fetch(`${baseUrl}/api/v1/content/abstract${qs({ uri: params.uri })}`),
+    'ov.tree': () => fetch(`${baseUrl}/api/v1/fs/tree${qs({ uri: params.uri })}`),
+    'ov.observer.queue': () => fetch(`${baseUrl}/api/v1/observer/queue`),
+    'ov.observer.system': () => fetch(`${baseUrl}/api/v1/observer/system`),
+    'ov.observer.vikingdb': () => fetch(`${baseUrl}/api/v1/observer/vikingdb`),
+    'ov.delete': () => fetch(`${baseUrl}/api/v1/fs${qs({ uri: params.uri, recursive: params.recursive })}`, { method: 'DELETE' }),
+
+    // Skills
+    'ov.add-skill': () => fetch(`${baseUrl}/api/v1/skills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: params.data, wait: params.wait ?? true })
+    }),
+    'ov.list-skills': () => fetch(`${baseUrl}/api/v1/fs/ls${qs({ uri: 'viking://agent/skills/', limit: (params.limit as number) || 256 })}`),
+    'ov.read-skill': () => fetch(`${baseUrl}/api/v1/content/read${qs({ uri: params.uri })}`),
+
+    // Sessions
+    'ov.session.create': () => fetch(`${baseUrl}/api/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    }),
+    'ov.session.message': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: params.role, content: params.content, parts: params.parts })
+    }),
+    'ov.session.commit': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}/commit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wait: params.wait ?? true })
+    }),
+    'ov.session.get': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}`),
+    'ov.session.list': () => fetch(`${baseUrl}/api/v1/sessions${qs({ limit: params.limit })}`)
+  }
+
+  const handler = routes[method]
+  if (!handler) throw new Error(`Unknown method: ${method}`)
+
+  const res = await handler()
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`OpenViking ${res.status}: ${text}`)
+  }
+  return res.json()
+}
