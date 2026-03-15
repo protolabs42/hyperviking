@@ -26,7 +26,10 @@ export default function CommunityPage () {
   const [user, setUser] = useState<UserData | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [community, setCommunity] = useState<CommunityConfig>({ name: 'HyperViking', tagline: 'Community Knowledge Base', emoji: '\ud83e\udde0', description: '', steps: [], features: [], links: [], footer: '' })
+  const [community, setCommunity] = useState<CommunityConfig>(() => {
+    if (typeof window !== 'undefined' && (window as any).__COMMUNITY__) return (window as any).__COMMUNITY__
+    return { name: 'HyperViking', tagline: 'Community Knowledge Base', emoji: '\ud83e\udde0', description: '', steps: [], features: [], links: [], footer: '' }
+  })
 
   // Member data
   const [stats, setStats] = useState<Stats | null>(null)

@@ -1,14 +1,17 @@
 import type { Metadata } from 'next'
 import { Geist, Geist_Mono } from 'next/font/google'
 import { ThemeProvider } from '@/components/theme-provider'
+import { getCommunityConfig } from '@/lib/community'
 import './globals.css'
 
 const geist = Geist({ variable: '--font-geist', subsets: ['latin'] })
 const geistMono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin'] })
 
+const community = getCommunityConfig()
+
 export const metadata: Metadata = {
-  title: 'HyperViking',
-  description: 'A shared brain for AI agents — encrypted P2P knowledge base with RBAC',
+  title: community.name,
+  description: `${community.tagline} — ${community.description}`,
 }
 
 // Inline script to set theme before React hydrates — prevents flash
@@ -20,6 +23,7 @@ export default function RootLayout ({ children }: { children: React.ReactNode })
       <head>
         <meta name="theme-color" content="#0a0a0f" />
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        <script dangerouslySetInnerHTML={{ __html: `window.__COMMUNITY__=${JSON.stringify(community)};` }} />
       </head>
       <body className={`${geist.variable} ${geistMono.variable} font-sans antialiased`}>
         <ThemeProvider>
