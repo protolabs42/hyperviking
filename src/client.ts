@@ -61,7 +61,13 @@ export async function createClient (opts: ClientOptions): Promise<HyperVikingCli
       decoder = new Decoder()
 
       conn.on('data', (chunk: Buffer) => {
-        decoder.push(chunk)
+        try {
+          decoder.push(chunk)
+        } catch (err) {
+          console.error('[hyperviking-client] protocol error:', (err as Error).message)
+          conn!.destroy()
+          return
+        }
         for (const msg of decoder.drain()) {
           const res = msg as JsonRpcResponse
           const p = pending.get(res.id)

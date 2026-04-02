@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, chmodSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import DHT from 'hyperdht'
@@ -49,6 +49,14 @@ export function generateKeypair (name: string): KeyPair {
 export function loadKeypair (name: string): KeyPair | null {
   const path = join(KEYS_DIR, `${name}.json`)
   if (!existsSync(path)) return null
+  // Harden permissions on existing key files (retroactive fix)
+  try {
+    const st = statSync(path)
+    if ((st.mode & 0o077) !== 0) {
+      chmodSync(path, 0o600)
+      console.log(`[hyperviking] fixed insecure permissions on ${name}.json → 0600`)
+    }
+  } catch { /* stat/chmod may fail on some platforms */ }
   const data = JSON.parse(readFileSync(path, 'utf8')) as StoredKey
   return {
     publicKey: b4a.from(data.publicKey, 'hex') as Buffer,

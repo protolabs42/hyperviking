@@ -140,48 +140,64 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
     const decoder = new Decoder()
 
     conn.on('data', async (chunk: Buffer) => {
-      decoder.push(chunk)
+      // Decode with protocol-level error handling — destroy socket on bad frames
+      try {
+        decoder.push(chunk)
+      } catch (err) {
+        console.error(`[hyperviking] protocol error from ${peerName}: ${(err as Error).message}`)
+        conn.destroy()
+        return
+      }
+
       for (const msg of decoder.drain()) {
         const req = msg as RpcRequest
 
+        // Sanitize method for logging (prevent audit disk fill)
+        const safeMethod = typeof req.method === 'string' ? req.method.slice(0, 256) : 'invalid'
+
         // ── RBAC mode: full middleware stack ──
         if (useRbac) {
+          // Re-resolve member from current roleList on every request (not cached from connect time)
+          const currentMember = getMember(roleList!, remoteKey)
+
           const entry: AuditEntry = {
             timestamp: new Date().toISOString(),
             peer: remoteKey.slice(0, 12),
-            peerName: member?.name ?? 'unknown',
-            role: member?.role ?? 'none',
-            method: req.method,
+            peerName: currentMember?.name ?? 'unknown',
+            role: currentMember?.role ?? 'none',
+            method: safeMethod,
             status: 'allowed'
           }
 
           try {
-            if (!member) {
+            if (!currentMember) {
               entry.status = 'denied'
               entry.error = 'not a member'
               audit!.log(entry)
               conn.write(rpcError(req.id, -32001, 'Access denied: not a member'))
-              continue
+              // Evict revoked peers — close connection after denial
+              conn.destroy()
+              return
             }
 
-            if (!limiter!.check(remoteKey, member.role)) {
+            if (!limiter!.check(remoteKey, currentMember.role)) {
               entry.status = 'rate-limited'
               audit!.log(entry)
               conn.write(rpcError(req.id, -32002, 'Rate limit exceeded'))
               continue
             }
 
-            if (!isAllowed(member.role, req.method)) {
+            if (!isAllowed(currentMember.role, req.method)) {
               entry.status = 'denied'
-              entry.error = `role '${member.role}' cannot call '${req.method}'`
+              entry.error = `role '${currentMember.role}' cannot call '${safeMethod}'`
               audit!.log(entry)
-              conn.write(rpcError(req.id, -32003, `Permission denied: ${member.role} cannot call ${req.method}`))
+              conn.write(rpcError(req.id, -32003, `Permission denied: ${currentMember.role} cannot call ${safeMethod}`))
               continue
             }
 
             // Handle member management methods
             if (req.method.startsWith('hv.')) {
-              const result = handleHvMethod(req, remoteKey, member, roleList!, roleListPath, audit!)
+              const result = handleHvMethod(req, remoteKey, currentMember, roleList!, roleListPath, audit!)
               audit!.log(entry)
               conn.write(response(req.id, result))
               continue
@@ -193,10 +209,10 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
             conn.write(response(req.id, result))
           } catch (err) {
             entry.status = 'error'
-            entry.error = (err as Error).message
+            entry.error = (err as Error).message.slice(0, 512)
             audit!.log(entry)
             console.error(`[hyperviking] request error:`, (err as Error).message)
-            conn.write(rpcError(req.id, -32000, (err as Error).message))
+            conn.write(rpcError(req.id, -32000, 'Internal server error'))
           }
         } else {
           // ── Simple mode: direct proxy ──
@@ -205,7 +221,7 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
             conn.write(response(req.id, result))
           } catch (err) {
             console.error(`[hyperviking] request error:`, (err as Error).message)
-            conn.write(rpcError(req.id, -32000, (err as Error).message))
+            conn.write(rpcError(req.id, -32000, 'Internal server error'))
           }
         }
       }
