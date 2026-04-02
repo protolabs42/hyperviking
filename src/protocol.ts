@@ -27,6 +27,8 @@ export function encode (obj: JsonRpcMessage): Buffer {
   return b4a.concat([header, payload]) as Buffer
 }
 
+const MAX_MESSAGE_SIZE = 16 * 1024 * 1024 // 16 MB
+
 export class Decoder {
   private _buf: Buffer
   private _messages: JsonRpcMessage[]
@@ -40,6 +42,10 @@ export class Decoder {
     this._buf = b4a.concat([this._buf, chunk]) as Buffer
     while (this._buf.byteLength >= 4) {
       const len = this._buf.readUInt32LE(0)
+      if (len > MAX_MESSAGE_SIZE) {
+        this._buf = b4a.alloc(0) as Buffer
+        throw new Error(`Message too large: ${len} bytes (max ${MAX_MESSAGE_SIZE})`)
+      }
       if (this._buf.byteLength < 4 + len) break
       const payload = this._buf.subarray(4, 4 + len)
       this._buf = this._buf.subarray(4 + len) as Buffer

@@ -30,7 +30,7 @@ interface AllowlistData {
 const KEYS_DIR = join(homedir(), '.hyperviking', 'keys')
 
 export function ensureKeysDir (): void {
-  if (!existsSync(KEYS_DIR)) mkdirSync(KEYS_DIR, { recursive: true })
+  if (!existsSync(KEYS_DIR)) mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 })
 }
 
 export function generateKeypair (name: string): KeyPair {
@@ -42,7 +42,7 @@ export function generateKeypair (name: string): KeyPair {
     secretKey: b4a.toString(keyPair.secretKey, 'hex'),
     createdAt: new Date().toISOString()
   }
-  writeFileSync(join(KEYS_DIR, `${name}.json`), JSON.stringify(data, null, 2))
+  writeFileSync(join(KEYS_DIR, `${name}.json`), JSON.stringify(data, null, 2), { mode: 0o600 })
   return keyPair
 }
 

@@ -343,6 +343,14 @@ function handleHvMethod (
 
 // ── OpenViking proxy ──
 
+function validatePathParam (value: unknown, name: string): string {
+  const s = String(value ?? '')
+  if (!/^[a-zA-Z0-9._-]+$/.test(s)) {
+    throw new Error(`Invalid ${name}: must be alphanumeric, dash, dot, or underscore`)
+  }
+  return s
+}
+
 async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unknown> {
   const { method, params } = req
 
@@ -388,7 +396,7 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
     'ov.observer.system': () => fetch(`${baseUrl}/api/v1/observer/system`),
     'ov.observer.vikingdb': () => fetch(`${baseUrl}/api/v1/observer/vikingdb`),
     'ov.stats.memories': () => fetch(`${baseUrl}/api/v1/stats/memories${qs({ category: params.category })}`),
-    'ov.session.stats': () => fetch(`${baseUrl}/api/v1/stats/sessions/${params.session_id}`),
+    'ov.session.stats': () => fetch(`${baseUrl}/api/v1/stats/sessions/${validatePathParam(params.session_id, 'session_id')}`),
     'ov.delete': () => fetch(`${baseUrl}/api/v1/fs${qs({ uri: params.uri, recursive: params.recursive })}`, { method: 'DELETE' }),
 
     // Skills
@@ -406,23 +414,23 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params)
     }),
-    'ov.session.message': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}/messages`, {
+    'ov.session.message': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role: params.role, content: params.content, parts: params.parts })
     }),
-    'ov.session.commit': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}/commit`, {
+    'ov.session.commit': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params)
     }),
-    'ov.session.used': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}/used`, {
+    'ov.session.used': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/used`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contexts: params.contexts, skill: params.skill })
     }),
-    'ov.task.status': () => fetch(`${baseUrl}/api/v1/tasks/${params.task_id}`),
-    'ov.session.get': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}${qs({ auto_create: params.auto_create })}`),
+    'ov.task.status': () => fetch(`${baseUrl}/api/v1/tasks/${validatePathParam(params.task_id, 'task_id')}`),
+    'ov.session.get': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}${qs({ auto_create: params.auto_create })}`),
     'ov.session.list': () => fetch(`${baseUrl}/api/v1/sessions${qs({ limit: params.limit })}`)
   }
 
