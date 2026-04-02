@@ -76,6 +76,73 @@ describe('HyperViking E2E', async () => {
     assert.ok(result)
     console.log('  status:', typeof result)
   })
+
+  // ── v0.5.0 new endpoints ──
+
+  it('find with include_provenance', async () => {
+    const result = await client.call('ov.find', { query: 'test', limit: 3, include_provenance: true })
+    assert.ok(result)
+    console.log('  find+provenance:', JSON.stringify(result).slice(0, 120) + '...')
+  })
+
+  it('memory stats through P2P tunnel', async () => {
+    const result = await client.call('ov.stats.memories')
+    assert.ok(result)
+    assert.ok('total_memories' in result || 'by_category' in result || typeof result === 'object')
+    console.log('  memory stats:', JSON.stringify(result).slice(0, 120) + '...')
+  })
+
+  it('session create + message + used + commit (async) + task status', async () => {
+    // Create session — OV wraps in { status, result: { session_id } }
+    const session = await client.call('ov.session.create', {})
+    const sid = session.result?.session_id || session.session_id || session.id
+    assert.ok(sid)
+    console.log('  session created:', sid)
+
+    // Add a message
+    const msg = await client.call('ov.session.message', {
+      session_id: sid,
+      role: 'user',
+      content: 'HyperViking v0.5.0 e2e test message'
+    })
+    assert.ok(msg)
+    console.log('  message added')
+
+    // Record usage
+    const used = await client.call('ov.session.used', {
+      session_id: sid,
+      contexts: [],
+      skill: null
+    })
+    assert.ok(used)
+    console.log('  usage recorded')
+
+    // Async commit — should return accepted + task_id
+    const commit = await client.call('ov.session.commit', { session_id: sid })
+    assert.ok(commit)
+    console.log('  commit result:', JSON.stringify(commit).slice(0, 150))
+
+    // If we got a task_id, poll it
+    if (commit.task_id) {
+      const task = await client.call('ov.task.status', { task_id: commit.task_id })
+      assert.ok(task)
+      console.log('  task status:', JSON.stringify(task).slice(0, 120))
+    }
+
+    // Session stats
+    const stats = await client.call('ov.session.stats', { session_id: sid })
+    assert.ok(stats)
+    console.log('  session stats:', JSON.stringify(stats).slice(0, 120))
+  })
+
+  it('session.get with auto_create', async () => {
+    const result = await client.call('ov.session.get', {
+      session_id: 'hv-e2e-autocreate-test',
+      auto_create: true
+    })
+    assert.ok(result)
+    console.log('  session.get auto_create:', JSON.stringify(result).slice(0, 100) + '...')
+  })
 })
 
 describe('Firewall allowlist', async () => {

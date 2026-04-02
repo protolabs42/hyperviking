@@ -357,7 +357,7 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
     'ov.find': () => fetch(`${baseUrl}/api/v1/search/find`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: params.query, uri: params.uri, limit: (params.limit as number) || 10 })
+      body: JSON.stringify({ query: params.query, uri: params.uri, limit: (params.limit as number) || 10, include_provenance: params.include_provenance })
     }),
     'ov.read': () => fetch(`${baseUrl}/api/v1/content/read${qs({ uri: params.uri })}`),
     'ov.overview': () => fetch(`${baseUrl}/api/v1/content/overview${qs({ uri: params.uri })}`),
@@ -378,10 +378,17 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
       body: JSON.stringify(params)
     }),
     'ov.abstract': () => fetch(`${baseUrl}/api/v1/content/abstract${qs({ uri: params.uri })}`),
+    'ov.write': () => fetch(`${baseUrl}/api/v1/content/write`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri: params.uri, content: params.content, mode: params.mode ?? 'replace', wait: params.wait ?? false, timeout: params.timeout })
+    }),
     'ov.tree': () => fetch(`${baseUrl}/api/v1/fs/tree${qs({ uri: params.uri })}`),
     'ov.observer.queue': () => fetch(`${baseUrl}/api/v1/observer/queue`),
     'ov.observer.system': () => fetch(`${baseUrl}/api/v1/observer/system`),
     'ov.observer.vikingdb': () => fetch(`${baseUrl}/api/v1/observer/vikingdb`),
+    'ov.stats.memories': () => fetch(`${baseUrl}/api/v1/stats/memories${qs({ category: params.category })}`),
+    'ov.session.stats': () => fetch(`${baseUrl}/api/v1/stats/sessions/${params.session_id}`),
     'ov.delete': () => fetch(`${baseUrl}/api/v1/fs${qs({ uri: params.uri, recursive: params.recursive })}`, { method: 'DELETE' }),
 
     // Skills
@@ -407,9 +414,15 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
     'ov.session.commit': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ wait: params.wait ?? true })
+      body: JSON.stringify(params)
     }),
-    'ov.session.get': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}`),
+    'ov.session.used': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}/used`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contexts: params.contexts, skill: params.skill })
+    }),
+    'ov.task.status': () => fetch(`${baseUrl}/api/v1/tasks/${params.task_id}`),
+    'ov.session.get': () => fetch(`${baseUrl}/api/v1/sessions/${params.session_id}${qs({ auto_create: params.auto_create })}`),
     'ov.session.list': () => fetch(`${baseUrl}/api/v1/sessions${qs({ limit: params.limit })}`)
   }
 

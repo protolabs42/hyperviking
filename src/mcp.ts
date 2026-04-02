@@ -54,7 +54,8 @@ const TOOLS: ToolDefinition[] = [
       properties: {
         query: { type: 'string', description: 'Natural language search query' },
         uri: { type: 'string', description: 'Scope search to a URI (e.g. viking://resources/my-repo)' },
-        limit: { type: 'number', description: 'Max results (default 10)', default: 10 }
+        limit: { type: 'number', description: 'Max results (default 10)', default: 10 },
+        include_provenance: { type: 'boolean', description: 'Include retrieval trajectory (tiers, match reasons, thinking trace)' }
       },
       required: ['query']
     }
@@ -225,14 +226,73 @@ const TOOLS: ToolDefinition[] = [
   },
   {
     name: 'viking_session_commit',
-    description: 'Commit a session to the knowledge base.',
+    description: 'Commit a session. Returns immediately with { status: "accepted", task_id }. Use viking_task_status to poll for completion.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Session ID' }
+      },
+      required: ['session_id']
+    }
+  },
+  {
+    name: 'viking_session_used',
+    description: 'Record which contexts and skills were actually used during a session. Call before commit to update memory active_count/hotness.',
     inputSchema: {
       type: 'object',
       properties: {
         session_id: { type: 'string', description: 'Session ID' },
-        wait: { type: 'boolean', description: 'Wait for indexing', default: true }
+        contexts: { type: 'string', description: 'JSON array of context URIs that were used' },
+        skill: { type: 'string', description: 'Skill URI that was used' }
       },
       required: ['session_id']
+    }
+  },
+  {
+    name: 'viking_task_status',
+    description: 'Poll the status of a background task (e.g. after an async session commit). Returns task state and token_usage when complete.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task ID returned from async operations' }
+      },
+      required: ['task_id']
+    }
+  },
+  {
+    name: 'viking_memory_stats',
+    description: 'Get memory health statistics: total count, category breakdown, hotness distribution (cold/warm/hot), staleness metrics.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        category: { type: 'string', description: 'Filter by category (e.g. profile, entities, cases, tools)' }
+      }
+    }
+  },
+  {
+    name: 'viking_session_stats',
+    description: 'Get per-session extraction statistics: turns, memories extracted, contexts used, skills used.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Session ID' }
+      },
+      required: ['session_id']
+    }
+  },
+  {
+    name: 'viking_write',
+    description: 'Write content to an existing file in the knowledge base. Supports replace and append modes. Triggers semantic refresh after write.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uri: { type: 'string', description: 'Viking URI of the file to write (must exist, must be a file)' },
+        content: { type: 'string', description: 'Content to write' },
+        mode: { type: 'string', description: 'Write mode', enum: ['replace', 'append'], default: 'replace' },
+        wait: { type: 'boolean', description: 'Wait for semantic refresh to complete', default: false },
+        timeout: { type: 'number', description: 'Timeout in seconds when wait=true' }
+      },
+      required: ['uri', 'content']
     }
   },
 
@@ -300,7 +360,7 @@ const TOOLS: ToolDefinition[] = [
 
 const TOOL_RPC: Record<string, RpcMapper> = {
   // Knowledge
-  viking_find: (args) => ['ov.find', { query: args.query, uri: args.uri, limit: (args.limit as number) || 10 }],
+  viking_find: (args) => ['ov.find', { query: args.query, uri: args.uri, limit: (args.limit as number) || 10, include_provenance: args.include_provenance }],
   viking_grep: (args) => ['ov.grep', { pattern: args.pattern, uri: args.uri }],
   viking_glob: (args) => ['ov.glob', { pattern: args.pattern, uri: args.uri }],
   viking_read: (args) => ['ov.read', { uri: args.uri }],
@@ -321,7 +381,12 @@ const TOOL_RPC: Record<string, RpcMapper> = {
   // Sessions
   viking_session_create: () => ['ov.session.create', {}],
   viking_session_message: (args) => ['ov.session.message', { session_id: args.session_id, role: args.role, content: args.content }],
-  viking_session_commit: (args) => ['ov.session.commit', { session_id: args.session_id, wait: args.wait ?? true }],
+  viking_session_commit: (args) => ['ov.session.commit', { session_id: args.session_id }],
+  viking_session_used: (args) => ['ov.session.used', { session_id: args.session_id, contexts: args.contexts, skill: args.skill }],
+  viking_task_status: (args) => ['ov.task.status', { task_id: args.task_id }],
+  viking_memory_stats: (args) => ['ov.stats.memories', { category: args.category }],
+  viking_session_stats: (args) => ['ov.session.stats', { session_id: args.session_id }],
+  viking_write: (args) => ['ov.write', { uri: args.uri, content: args.content, mode: args.mode ?? 'replace', wait: args.wait ?? false, timeout: args.timeout }],
 
   // Members (RBAC)
   viking_whoami: () => ['hv.whoami', {}],
@@ -385,7 +450,7 @@ async function main (): Promise<void> {
             capabilities: { tools: {} },
             serverInfo: {
               name: 'hyperviking',
-              version: '0.3.0'
+              version: '0.5.0'
             }
           })
           break

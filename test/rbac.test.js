@@ -91,16 +91,31 @@ describe('Permission matrix', () => {
     assert.equal(isAllowed('reader', 'hv.members'), true)
   })
 
-  it('reader cannot write', () => {
+  it('reader can access stats and task status', () => {
+    assert.equal(isAllowed('reader', 'ov.stats.memories'), true)
+    assert.equal(isAllowed('reader', 'ov.session.stats'), true)
+    assert.equal(isAllowed('reader', 'ov.task.status'), true)
+  })
+
+  it('reader cannot write or use session methods', () => {
     assert.equal(isAllowed('reader', 'ov.add-resource'), false)
     assert.equal(isAllowed('reader', 'ov.delete'), false)
     assert.equal(isAllowed('reader', 'hv.add-member'), false)
+    assert.equal(isAllowed('reader', 'ov.write'), false)
+    assert.equal(isAllowed('reader', 'ov.session.used'), false)
   })
 
   it('contributor can read and write resources', () => {
     assert.equal(isAllowed('contributor', 'ov.find'), true)
     assert.equal(isAllowed('contributor', 'ov.add-resource'), true)
     assert.equal(isAllowed('contributor', 'ov.add-skill'), true)
+  })
+
+  it('contributor can write content and record usage', () => {
+    assert.equal(isAllowed('contributor', 'ov.write'), true)
+    assert.equal(isAllowed('contributor', 'ov.session.used'), true)
+    assert.equal(isAllowed('contributor', 'ov.stats.memories'), true)
+    assert.equal(isAllowed('contributor', 'ov.task.status'), true)
   })
 
   it('contributor cannot manage members', () => {
@@ -117,6 +132,10 @@ describe('Permission matrix', () => {
     assert.equal(isAllowed('admin', 'hv.remove-member'), true)
     assert.equal(isAllowed('admin', 'hv.update-role'), true)
     assert.equal(isAllowed('admin', 'hv.audit'), true)
+    assert.equal(isAllowed('admin', 'ov.write'), true)
+    assert.equal(isAllowed('admin', 'ov.session.used'), true)
+    assert.equal(isAllowed('admin', 'ov.stats.memories'), true)
+    assert.equal(isAllowed('admin', 'ov.task.status'), true)
   })
 
   it('unknown method is denied for all roles', () => {
