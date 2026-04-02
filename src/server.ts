@@ -81,6 +81,10 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
   const roleListPath = rolesConfig?.path ?? MEMBERS_PATH
   const auditLogPath = rolesConfig?.auditPath ?? AUDIT_PATH
 
+  // Track active connections + in-flight requests per peer for revocation
+  const peerAbortControllers = new Map<string, Set<AbortController>>()
+  const peerConnections = new Map<string, Duplex>()
+
   if (useRbac) {
     roleList = loadRoleList(roleListPath)
     audit = new AuditLog(auditLogPath)
@@ -93,11 +97,29 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
         reloadDebounce = setTimeout(() => {
           try {
             const updated = loadRoleList(roleListPath)
-            const oldCount = Object.keys(roleList!.members).length
+            const oldMembers = new Set(Object.keys(roleList!.members))
             roleList = updated
-            const newCount = Object.keys(roleList!.members).length
-            if (oldCount !== newCount) {
-              console.log(`[hyperviking] role-list reloaded: ${newCount} members (was ${oldCount})`)
+            const newMembers = new Set(Object.keys(roleList!.members))
+
+            // Evict removed members: abort in-flight requests + destroy connections
+            for (const key of oldMembers) {
+              if (!newMembers.has(key)) {
+                const controllers = peerAbortControllers.get(key)
+                if (controllers) {
+                  for (const ac of controllers) ac.abort()
+                  peerAbortControllers.delete(key)
+                }
+                const conn = peerConnections.get(key)
+                if (conn) {
+                  console.log(`[hyperviking] evicting revoked peer: ${key.slice(0, 12)}...`)
+                  conn.destroy()
+                  peerConnections.delete(key)
+                }
+              }
+            }
+
+            if (oldMembers.size !== newMembers.size) {
+              console.log(`[hyperviking] role-list reloaded: ${newMembers.size} members (was ${oldMembers.size})`)
             }
           } catch (err) {
             console.error(`[hyperviking] failed to reload role-list:`, (err as Error).message)
@@ -136,6 +158,10 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
 
     console.log(`[hyperviking] peer connected: ${peerName} (${remoteKey.slice(0, 12)}...)${member ? ` role=${member.role}` : ''}`)
     connections.add(conn)
+    if (useRbac) {
+      peerConnections.set(remoteKey, conn)
+      peerAbortControllers.set(remoteKey, new Set())
+    }
 
     const decoder = new Decoder()
 
@@ -210,8 +236,17 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
               }
             }
 
-            // Proxy to OpenViking
-            const result = await proxyToOpenViking(req, openVikingUrl)
+            // Proxy to OpenViking with per-peer abort tracking
+            const ac = new AbortController()
+            const peerAcs = peerAbortControllers.get(remoteKey)
+            if (peerAcs) peerAcs.add(ac)
+
+            let result: unknown
+            try {
+              result = await proxyToOpenViking(req, openVikingUrl, ac.signal)
+            } finally {
+              if (peerAcs) peerAcs.delete(ac)
+            }
 
             // Re-check membership after await — closes TOCTOU revocation window
             if (!getMember(roleList!, remoteKey)) {
@@ -247,11 +282,20 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
     conn.on('close', () => {
       console.log(`[hyperviking] peer disconnected: ${peerName} (${remoteKey.slice(0, 12)}...)`)
       connections.delete(conn)
+      peerConnections.delete(remoteKey)
+      // Abort any in-flight requests for this peer
+      const acs = peerAbortControllers.get(remoteKey)
+      if (acs) {
+        for (const ac of acs) ac.abort()
+        peerAbortControllers.delete(remoteKey)
+      }
     })
 
     conn.on('error', (err: Error) => {
       console.error(`[hyperviking] connection error:`, err.message)
       connections.delete(conn)
+      peerConnections.delete(remoteKey)
+      peerAbortControllers.delete(remoteKey)
       if (onError) onError(err)
     })
 
@@ -384,7 +428,7 @@ function validatePathParam (value: unknown, name: string): string {
   return s
 }
 
-async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unknown> {
+async function proxyToOpenViking (req: RpcRequest, baseUrl: string, signal?: AbortSignal): Promise<unknown> {
   const { method, params } = req
 
   function qs (obj: Record<string, unknown>): string {
@@ -471,6 +515,9 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
   if (!handler) throw new Error(`Unknown method: ${method}`)
 
   const MAX_RESPONSE_SIZE = 8 * 1024 * 1024 // 8 MB
+
+  // Check abort signal before starting the fetch
+  if (signal?.aborted) throw new Error('Request aborted: access revoked')
 
   const res = await handler()
   if (!res.ok) {
