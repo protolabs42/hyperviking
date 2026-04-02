@@ -91,10 +91,15 @@ describe('Permission matrix', () => {
     assert.equal(isAllowed('reader', 'hv.members'), true)
   })
 
-  it('reader can access stats and task status', () => {
+  it('reader can access aggregate stats and task polling', () => {
     assert.equal(isAllowed('reader', 'ov.stats.memories'), true)
-    assert.equal(isAllowed('reader', 'ov.session.stats'), true)
     assert.equal(isAllowed('reader', 'ov.task.status'), true)
+  })
+
+  it('reader cannot access session metadata', () => {
+    assert.equal(isAllowed('reader', 'ov.session.get'), false)
+    assert.equal(isAllowed('reader', 'ov.session.list'), false)
+    assert.equal(isAllowed('reader', 'ov.session.stats'), false)
   })
 
   it('reader cannot write or use session methods', () => {
@@ -111,9 +116,12 @@ describe('Permission matrix', () => {
     assert.equal(isAllowed('contributor', 'ov.add-skill'), true)
   })
 
-  it('contributor can write content and record usage', () => {
+  it('contributor can write content, record usage, and access sessions', () => {
     assert.equal(isAllowed('contributor', 'ov.write'), true)
     assert.equal(isAllowed('contributor', 'ov.session.used'), true)
+    assert.equal(isAllowed('contributor', 'ov.session.get'), true)
+    assert.equal(isAllowed('contributor', 'ov.session.list'), true)
+    assert.equal(isAllowed('contributor', 'ov.session.stats'), true)
     assert.equal(isAllowed('contributor', 'ov.stats.memories'), true)
     assert.equal(isAllowed('contributor', 'ov.task.status'), true)
   })

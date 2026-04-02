@@ -174,9 +174,9 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
               entry.status = 'denied'
               entry.error = 'not a member'
               audit!.log(entry)
-              conn.write(rpcError(req.id, -32001, 'Access denied: not a member'))
-              // Evict revoked peers — close connection after denial
-              conn.destroy()
+              // Flush-safe eviction: end() sends the frame then closes cleanly
+              const errBuf = rpcError(req.id, -32001, 'Access denied: not a member')
+              conn.end(errBuf)
               return
             }
 
@@ -201,6 +201,13 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
               audit!.log(entry)
               conn.write(response(req.id, result))
               continue
+            }
+
+            // Strip privileged params for readers
+            if (currentMember.role === 'reader') {
+              if (req.method === 'ov.session.get') {
+                delete req.params.auto_create // readers cannot create sessions via get
+              }
             }
 
             // Proxy to OpenViking
@@ -394,12 +401,12 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
     'ov.grep': () => fetch(`${baseUrl}/api/v1/search/grep`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params)
+      body: JSON.stringify({ pattern: params.pattern, uri: params.uri, limit: params.limit })
     }),
     'ov.glob': () => fetch(`${baseUrl}/api/v1/search/glob`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params)
+      body: JSON.stringify({ pattern: params.pattern, uri: params.uri, limit: params.limit })
     }),
     'ov.abstract': () => fetch(`${baseUrl}/api/v1/content/abstract${qs({ uri: params.uri })}`),
     'ov.write': () => fetch(`${baseUrl}/api/v1/content/write`, {
@@ -428,7 +435,7 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
     'ov.session.create': () => fetch(`${baseUrl}/api/v1/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params)
+      body: JSON.stringify({ session_id: params.session_id })
     }),
     'ov.session.message': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/messages`, {
       method: 'POST',
@@ -438,7 +445,7 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
     'ov.session.commit': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params)
+      body: JSON.stringify({ extract_skills: params.extract_skills, extract_memories: params.extract_memories })
     }),
     'ov.session.used': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/used`, {
       method: 'POST',
@@ -453,10 +460,16 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
   const handler = routes[method]
   if (!handler) throw new Error(`Unknown method: ${method}`)
 
+  const MAX_RESPONSE_SIZE = 8 * 1024 * 1024 // 8 MB
+
   const res = await handler()
   if (!res.ok) {
-    const text = await res.text()
+    const text = (await res.text()).slice(0, 1024)
     throw new Error(`OpenViking ${res.status}: ${text}`)
   }
-  return res.json()
+  const text = await res.text()
+  if (text.length > MAX_RESPONSE_SIZE) {
+    throw new Error(`Response too large: ${text.length} bytes (max ${MAX_RESPONSE_SIZE})`)
+  }
+  return JSON.parse(text)
 }

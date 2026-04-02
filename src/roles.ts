@@ -25,8 +25,7 @@ const READER_METHODS = new Set([
   'ov.abstract', 'ov.grep', 'ov.glob', 'ov.tree', 'ov.status',
   'ov.observer.queue', 'ov.observer.system', 'ov.observer.vikingdb',
   'ov.list-skills', 'ov.read-skill',
-  'ov.stats.memories', 'ov.session.stats', 'ov.task.status',
-  'ov.session.get', 'ov.session.list',
+  'ov.stats.memories', 'ov.task.status',
   'hv.whoami', 'hv.members'
 ])
 
@@ -34,7 +33,8 @@ const CONTRIBUTOR_METHODS = new Set([
   ...READER_METHODS,
   'ov.add-resource', 'ov.add-skill',
   'ov.session.create', 'ov.session.message', 'ov.session.commit',
-  'ov.session.used', 'ov.write'
+  'ov.session.used', 'ov.session.get', 'ov.session.list', 'ov.session.stats',
+  'ov.write'
 ])
 
 const ADMIN_METHODS = new Set([

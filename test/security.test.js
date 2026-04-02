@@ -41,6 +41,18 @@ describe('Security: protocol decoder', () => {
     assert.equal(msgs[0].id, 1)
   })
 
+  it('handles malformed JSON inside valid-length frame', () => {
+    const decoder = new Decoder()
+    const badJson = 'not valid json at all {'
+    const buf = b4a.from(badJson, 'utf8')
+    const header = Buffer.alloc(4)
+    header.writeUInt32LE(buf.byteLength, 0)
+    assert.throws(
+      () => decoder.push(b4a.concat([header, buf])),
+      /Unexpected token/
+    )
+  })
+
   it('recovers after rejecting oversized message', () => {
     const decoder = new Decoder()
     // Send oversized header — should throw and reset
@@ -57,6 +69,22 @@ describe('Security: protocol decoder', () => {
     const msgs = decoder.drain()
     assert.equal(msgs.length, 1)
     assert.equal(msgs[0].id, 2)
+  })
+})
+
+describe('Security: RBAC session metadata isolation', () => {
+  it('readers cannot access session metadata', () => {
+    assert.equal(isAllowed('reader', 'ov.session.get'), false)
+    assert.equal(isAllowed('reader', 'ov.session.list'), false)
+    assert.equal(isAllowed('reader', 'ov.session.stats'), false)
+    assert.equal(isAllowed('reader', 'ov.session.create'), false)
+  })
+
+  it('contributors can access session metadata', () => {
+    assert.equal(isAllowed('contributor', 'ov.session.get'), true)
+    assert.equal(isAllowed('contributor', 'ov.session.list'), true)
+    assert.equal(isAllowed('contributor', 'ov.session.stats'), true)
+    assert.equal(isAllowed('contributor', 'ov.session.create'), true)
   })
 })
 
