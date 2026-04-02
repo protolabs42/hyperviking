@@ -195,16 +195,16 @@ export async function setupServer (solo: boolean = false): Promise<void> {
 
   // ── Create directories ──
 
-  mkdirSync(OV_DIR, { recursive: true })
-  mkdirSync(DATA_DIR, { recursive: true })
+  mkdirSync(OV_DIR, { recursive: true, mode: 0o700 })
+  mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 })
 
   // ── Generate configs ──
 
   console.log('')
   console.log('Generating configs...')
 
-  writeFileSync(join(OV_DIR, 'docker-compose.yml'), generateDockerCompose(apiKey))
-  writeFileSync(join(OV_DIR, 'ov.conf'), generateOvConf(apiKey))
+  writeFileSync(join(OV_DIR, 'docker-compose.yml'), generateDockerCompose(apiKey), { mode: 0o600 })
+  writeFileSync(join(OV_DIR, 'ov.conf'), generateOvConf(apiKey), { mode: 0o600 })
 
   // ── Start OpenViking ──
 

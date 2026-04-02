@@ -212,6 +212,16 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
 
             // Proxy to OpenViking
             const result = await proxyToOpenViking(req, openVikingUrl)
+
+            // Re-check membership after await — closes TOCTOU revocation window
+            if (!getMember(roleList!, remoteKey)) {
+              entry.status = 'denied'
+              entry.error = 'revoked during request'
+              audit!.log(entry)
+              conn.end(rpcError(req.id, -32001, 'Access revoked'))
+              return
+            }
+
             audit!.log(entry)
             conn.write(response(req.id, result))
           } catch (err) {
@@ -464,12 +474,27 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string): Promise<unk
 
   const res = await handler()
   if (!res.ok) {
-    const text = (await res.text()).slice(0, 1024)
-    throw new Error(`OpenViking ${res.status}: ${text}`)
+    const errChunks: Uint8Array[] = []
+    let errLen = 0
+    for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+      errLen += chunk.byteLength
+      if (errLen <= 1024) errChunks.push(chunk)
+      else break
+    }
+    const errText = Buffer.concat(errChunks).toString('utf8')
+    throw new Error(`OpenViking ${res.status}: ${errText}`)
   }
-  const text = await res.text()
-  if (text.length > MAX_RESPONSE_SIZE) {
-    throw new Error(`Response too large: ${text.length} bytes (max ${MAX_RESPONSE_SIZE})`)
+
+  // Stream-read with incremental size enforcement — never buffer more than MAX_RESPONSE_SIZE
+  const chunks: Uint8Array[] = []
+  let totalLen = 0
+  for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+    totalLen += chunk.byteLength
+    if (totalLen > MAX_RESPONSE_SIZE) {
+      throw new Error(`Response too large: >${MAX_RESPONSE_SIZE} bytes`)
+    }
+    chunks.push(chunk)
   }
+  const text = Buffer.concat(chunks).toString('utf8')
   return JSON.parse(text)
 }
