@@ -295,7 +295,12 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
       console.error(`[hyperviking] connection error:`, err.message)
       connections.delete(conn)
       peerConnections.delete(remoteKey)
-      peerAbortControllers.delete(remoteKey)
+      // Abort in-flight requests on error (same as close handler)
+      const acs = peerAbortControllers.get(remoteKey)
+      if (acs) {
+        for (const ac of acs) ac.abort()
+        peerAbortControllers.delete(remoteKey)
+      }
       if (onError) onError(err)
     })
 
@@ -436,79 +441,83 @@ async function proxyToOpenViking (req: RpcRequest, baseUrl: string, signal?: Abo
     return entries.length ? '?' + new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString() : ''
   }
 
+  // Signal-aware fetch: abort in-flight requests when peer is revoked
+  const f = (input: string | URL, init?: RequestInit) =>
+    fetch(input, signal ? { ...init, signal } : init)
+
   const routes: Record<string, () => Promise<Response>> = {
-    'ov.health': () => fetch(`${baseUrl}/health`),
-    'ov.ls': () => fetch(`${baseUrl}/api/v1/fs/ls${qs({ uri: (params.uri as string) || 'viking://', limit: (params.limit as number) || 256 })}`),
-    'ov.find': () => fetch(`${baseUrl}/api/v1/search/find`, {
+    'ov.health': () => f(`${baseUrl}/health`),
+    'ov.ls': () => f(`${baseUrl}/api/v1/fs/ls${qs({ uri: (params.uri as string) || 'viking://', limit: (params.limit as number) || 256 })}`),
+    'ov.find': () => f(`${baseUrl}/api/v1/search/find`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query: params.query, uri: params.uri, limit: (params.limit as number) || 10, include_provenance: params.include_provenance })
     }),
-    'ov.read': () => fetch(`${baseUrl}/api/v1/content/read${qs({ uri: params.uri })}`),
-    'ov.overview': () => fetch(`${baseUrl}/api/v1/content/overview${qs({ uri: params.uri })}`),
-    'ov.status': () => fetch(`${baseUrl}/api/v1/system/status`),
-    'ov.add-resource': () => fetch(`${baseUrl}/api/v1/resources`, {
+    'ov.read': () => f(`${baseUrl}/api/v1/content/read${qs({ uri: params.uri })}`),
+    'ov.overview': () => f(`${baseUrl}/api/v1/content/overview${qs({ uri: params.uri })}`),
+    'ov.status': () => f(`${baseUrl}/api/v1/system/status`),
+    'ov.add-resource': () => f(`${baseUrl}/api/v1/resources`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: params.path, target: params.target })
     }),
-    'ov.grep': () => fetch(`${baseUrl}/api/v1/search/grep`, {
+    'ov.grep': () => f(`${baseUrl}/api/v1/search/grep`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pattern: params.pattern, uri: params.uri, limit: params.limit })
     }),
-    'ov.glob': () => fetch(`${baseUrl}/api/v1/search/glob`, {
+    'ov.glob': () => f(`${baseUrl}/api/v1/search/glob`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pattern: params.pattern, uri: params.uri, limit: params.limit })
     }),
-    'ov.abstract': () => fetch(`${baseUrl}/api/v1/content/abstract${qs({ uri: params.uri })}`),
-    'ov.write': () => fetch(`${baseUrl}/api/v1/content/write`, {
+    'ov.abstract': () => f(`${baseUrl}/api/v1/content/abstract${qs({ uri: params.uri })}`),
+    'ov.write': () => f(`${baseUrl}/api/v1/content/write`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ uri: params.uri, content: params.content, mode: params.mode ?? 'replace', wait: params.wait ?? false, timeout: params.timeout })
     }),
-    'ov.tree': () => fetch(`${baseUrl}/api/v1/fs/tree${qs({ uri: params.uri })}`),
-    'ov.observer.queue': () => fetch(`${baseUrl}/api/v1/observer/queue`),
-    'ov.observer.system': () => fetch(`${baseUrl}/api/v1/observer/system`),
-    'ov.observer.vikingdb': () => fetch(`${baseUrl}/api/v1/observer/vikingdb`),
-    'ov.stats.memories': () => fetch(`${baseUrl}/api/v1/stats/memories${qs({ category: params.category })}`),
-    'ov.session.stats': () => fetch(`${baseUrl}/api/v1/stats/sessions/${validatePathParam(params.session_id, 'session_id')}`),
-    'ov.delete': () => fetch(`${baseUrl}/api/v1/fs${qs({ uri: params.uri, recursive: params.recursive })}`, { method: 'DELETE' }),
+    'ov.tree': () => f(`${baseUrl}/api/v1/fs/tree${qs({ uri: params.uri })}`),
+    'ov.observer.queue': () => f(`${baseUrl}/api/v1/observer/queue`),
+    'ov.observer.system': () => f(`${baseUrl}/api/v1/observer/system`),
+    'ov.observer.vikingdb': () => f(`${baseUrl}/api/v1/observer/vikingdb`),
+    'ov.stats.memories': () => f(`${baseUrl}/api/v1/stats/memories${qs({ category: params.category })}`),
+    'ov.session.stats': () => f(`${baseUrl}/api/v1/stats/sessions/${validatePathParam(params.session_id, 'session_id')}`),
+    'ov.delete': () => f(`${baseUrl}/api/v1/fs${qs({ uri: params.uri, recursive: params.recursive })}`, { method: 'DELETE' }),
 
     // Skills
-    'ov.add-skill': () => fetch(`${baseUrl}/api/v1/skills`, {
+    'ov.add-skill': () => f(`${baseUrl}/api/v1/skills`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ data: params.data, wait: params.wait ?? true })
     }),
-    'ov.list-skills': () => fetch(`${baseUrl}/api/v1/fs/ls${qs({ uri: 'viking://agent/skills/', limit: (params.limit as number) || 256 })}`),
-    'ov.read-skill': () => fetch(`${baseUrl}/api/v1/content/read${qs({ uri: params.uri })}`),
+    'ov.list-skills': () => f(`${baseUrl}/api/v1/fs/ls${qs({ uri: 'viking://agent/skills/', limit: (params.limit as number) || 256 })}`),
+    'ov.read-skill': () => f(`${baseUrl}/api/v1/content/read${qs({ uri: params.uri })}`),
 
     // Sessions
-    'ov.session.create': () => fetch(`${baseUrl}/api/v1/sessions`, {
+    'ov.session.create': () => f(`${baseUrl}/api/v1/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: params.session_id })
     }),
-    'ov.session.message': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/messages`, {
+    'ov.session.message': () => f(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role: params.role, content: params.content, parts: params.parts })
     }),
-    'ov.session.commit': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/commit`, {
+    'ov.session.commit': () => f(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ extract_skills: params.extract_skills, extract_memories: params.extract_memories })
     }),
-    'ov.session.used': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/used`, {
+    'ov.session.used': () => f(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}/used`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contexts: params.contexts, skill: params.skill })
     }),
-    'ov.task.status': () => fetch(`${baseUrl}/api/v1/tasks/${validatePathParam(params.task_id, 'task_id')}`),
-    'ov.session.get': () => fetch(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}${qs({ auto_create: params.auto_create })}`),
-    'ov.session.list': () => fetch(`${baseUrl}/api/v1/sessions${qs({ limit: params.limit })}`)
+    'ov.task.status': () => f(`${baseUrl}/api/v1/tasks/${validatePathParam(params.task_id, 'task_id')}`),
+    'ov.session.get': () => f(`${baseUrl}/api/v1/sessions/${validatePathParam(params.session_id, 'session_id')}${qs({ auto_create: params.auto_create })}`),
+    'ov.session.list': () => f(`${baseUrl}/api/v1/sessions${qs({ limit: params.limit })}`)
   }
 
   const handler = routes[method]
