@@ -7,6 +7,8 @@ import { getOrCreateKeypair } from './keys.js'
 
 export interface ClientOptions {
   name?: string
+  /** Use an ephemeral keypair (not saved to disk). Avoids key file pollution and same-key conflicts. */
+  ephemeral?: boolean
   serverPublicKey: string | Buffer
   connectTimeout?: number
 }
@@ -42,7 +44,7 @@ export async function createClient (opts: ClientOptions): Promise<HyperVikingCli
     ? b4a.from(serverPublicKey, 'hex') as Buffer
     : serverPublicKey as Buffer
 
-  const keyPair = getOrCreateKeypair(name)
+  const keyPair = opts.ephemeral ? DHT.keyPair() : getOrCreateKeypair(name)
   // Disable local connection optimization to prevent duplicate connection races
   // when client and server run on the same machine
   const dht = new DHT({ keyPair, localConnection: false })

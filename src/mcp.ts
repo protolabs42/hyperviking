@@ -420,6 +420,7 @@ async function main (): Promise<void> {
   try {
     client = await createClient({
       name: 'mcp',
+      ephemeral: true,
       serverPublicKey: SERVER_KEY,
       connectTimeout: 30000
     })
