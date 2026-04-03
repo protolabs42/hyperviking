@@ -1,15 +1,28 @@
 #!/usr/bin/env node
-// MCP stdio server for HyperViking — zero extra dependencies
-// Implements MCP protocol (JSON-RPC 2.0 over newline-delimited stdin/stdout)
-// All logging goes to stderr (stdout is protocol-only)
+// MCP server for HyperViking — zero extra dependencies
+// Supports two transports:
+//   stdio:  newline-delimited JSON-RPC on stdin/stdout (one session per process)
+//   http:   Streamable HTTP transport on localhost (multi-session, one P2P connection)
+//
+// Usage:
+//   hv mcp <server-key> [identity]              — stdio mode
+//   hv mcp <server-key> [identity] --http 1940  — HTTP mode on port 1940
 
 import { createClient, type HyperVikingClient } from './client.js'
 import { createInterface } from 'node:readline'
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 
-const SERVER_KEY = process.argv[2]
-const IDENTITY = process.argv[3] // optional: persistent keypair name for RBAC servers
+// Parse args: <server-key> [identity] [--http port]
+const args = process.argv.slice(2)
+const httpIdx = args.indexOf('--http')
+const HTTP_MODE = httpIdx !== -1
+const HTTP_PORT = HTTP_MODE ? parseInt(args[httpIdx + 1] || '1940', 10) : 0
+const filteredArgs = HTTP_MODE ? args.filter((_, i) => i !== httpIdx && i !== httpIdx + 1) : args
+
+const SERVER_KEY = filteredArgs[0]
+const IDENTITY = filteredArgs[1]
 if (!SERVER_KEY) {
-  process.stderr.write('Usage: hv mcp <server-public-key> [identity-name]\n')
+  process.stderr.write('Usage: hv mcp <server-key> [identity] [--http port]\n')
   process.exit(1)
 }
 
@@ -398,119 +411,83 @@ const TOOL_RPC: Record<string, RpcMapper> = {
   viking_audit: (args) => ['hv.audit', { count: args.count || 50 }]
 }
 
-/* -- MCP protocol helpers ----------------------------------------------- */
+/* -- MCP message handler (transport-agnostic) ----------------------------- */
 
-function send (msg: Record<string, unknown>): void {
-  process.stdout.write(JSON.stringify(msg) + '\n')
-}
+async function handleMessage (msg: McpRequest, client: HyperVikingClient): Promise<Record<string, unknown> | null> {
+  const { id, method, params } = msg
 
-function result (id: number, data: unknown): void {
-  send({ jsonrpc: '2.0', id, result: data })
-}
+  switch (method) {
+    case 'initialize':
+      return { jsonrpc: '2.0', id, result: {
+        protocolVersion: '2025-11-05',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'hyperviking', version: '0.5.0' }
+      }}
 
-function error (id: number, code: number, message: string): void {
-  send({ jsonrpc: '2.0', id, error: { code, message } })
-}
+    case 'notifications/initialized':
+      return null // no response for notifications
 
-/* -- Main --------------------------------------------------------------- */
+    case 'tools/list':
+      return { jsonrpc: '2.0', id, result: { tools: TOOLS } }
 
-async function main (): Promise<void> {
-  process.stderr.write(`[hyperviking-mcp] connecting to ${SERVER_KEY.slice(0, 12)}...\n`)
+    case 'tools/call': {
+      const toolName = params?.name
+      const toolArgs = params?.arguments || {}
+      const mapper = toolName ? TOOL_RPC[toolName] : undefined
 
-  let client: HyperVikingClient
-  try {
-    client = await createClient({
-      name: IDENTITY || 'mcp',
-      ephemeral: !IDENTITY, // ephemeral for local, persistent for RBAC servers
-      serverPublicKey: SERVER_KEY,
-      connectTimeout: 30000
-    })
-    process.stderr.write('[hyperviking-mcp] connected\n')
-  } catch (err) {
-    process.stderr.write(`[hyperviking-mcp] connection failed: ${(err as Error).message}\n`)
-    process.exit(1)
+      if (!mapper) {
+        return { jsonrpc: '2.0', id, result: {
+          content: [{ type: 'text', text: `Unknown tool: ${toolName}` }],
+          isError: true
+        }}
+      }
+
+      const [rpcMethod, rpcParams] = mapper(toolArgs)
+      try {
+        const data = await client.call(rpcMethod, rpcParams)
+        const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
+        return { jsonrpc: '2.0', id, result: {
+          content: [{ type: 'text', text }]
+        }}
+      } catch (err) {
+        return { jsonrpc: '2.0', id, result: {
+          content: [{ type: 'text', text: `Error: ${(err as Error).message}` }],
+          isError: true
+        }}
+      }
+    }
+
+    case 'ping':
+      return { jsonrpc: '2.0', id, result: {} }
+
+    default:
+      if (id != null) {
+        return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } }
+      }
+      return null
   }
+}
 
+/* -- Transport: stdio ----------------------------------------------------- */
+
+function startStdio (client: HyperVikingClient): void {
   const rl = createInterface({ input: process.stdin })
 
   rl.on('line', async (line: string) => {
     let msg: McpRequest
     try {
       msg = JSON.parse(line) as McpRequest
-    } catch {
-      return // ignore malformed
-    }
-
-    const { id, method, params } = msg
+    } catch { return }
 
     try {
-      switch (method) {
-        /* -- Initialize handshake -- */
-        case 'initialize':
-          result(id!, {
-            protocolVersion: '2024-11-05',
-            capabilities: { tools: {} },
-            serverInfo: {
-              name: 'hyperviking',
-              version: '0.5.0'
-            }
-          })
-          break
-
-        /* -- Initialized notification (no response needed) -- */
-        case 'notifications/initialized':
-          break
-
-        /* -- List tools -- */
-        case 'tools/list':
-          result(id!, { tools: TOOLS })
-          break
-
-        /* -- Call tool -- */
-        case 'tools/call': {
-          const toolName = params?.name
-          const args = params?.arguments || {}
-          const mapper = toolName ? TOOL_RPC[toolName] : undefined
-
-          if (!mapper) {
-            result(id!, {
-              content: [{ type: 'text', text: `Unknown tool: ${toolName}` }],
-              isError: true
-            })
-            break
-          }
-
-          const [rpcMethod, rpcParams] = mapper(args)
-          try {
-            const data = await client.call(rpcMethod, rpcParams)
-            const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
-            result(id!, {
-              content: [{ type: 'text', text }]
-            })
-          } catch (err) {
-            result(id!, {
-              content: [{ type: 'text', text: `Error: ${(err as Error).message}` }],
-              isError: true
-            })
-          }
-          break
-        }
-
-        /* -- Ping -- */
-        case 'ping':
-          result(id!, {})
-          break
-
-        /* -- Unknown -- */
-        default:
-          if (id != null) {
-            error(id, -32601, `Method not found: ${method}`)
-          }
-      }
+      const res = await handleMessage(msg, client)
+      if (res) process.stdout.write(JSON.stringify(res) + '\n')
     } catch (err) {
-      process.stderr.write(`[hyperviking-mcp] error handling ${method}: ${(err as Error).message}\n`)
-      if (id != null) {
-        error(id, -32603, (err as Error).message)
+      process.stderr.write(`[hyperviking-mcp] error: ${(err as Error).message}\n`)
+      if (msg.id != null) {
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: (err as Error).message }
+        }) + '\n')
       }
     }
   })
@@ -520,16 +497,111 @@ async function main (): Promise<void> {
     await client.close()
     process.exit(0)
   })
+}
 
-  process.on('SIGINT', async () => {
-    await client.close()
-    process.exit(0)
+/* -- Transport: Streamable HTTP ------------------------------------------- */
+
+function startHttp (client: HyperVikingClient, port: number): void {
+  const ALLOWED_ORIGINS = new Set(['http://localhost', 'http://127.0.0.1', 'null', ''])
+
+  const server = createHttpServer(async (req: IncomingMessage, res: ServerResponse) => {
+    // Only accept POST to /mcp
+    if (req.method !== 'POST' || (req.url !== '/mcp' && req.url !== '/')) {
+      // Also handle GET for health check
+      if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ status: 'ok', transport: 'http', identity: IDENTITY || 'ephemeral' }))
+        return
+      }
+      res.writeHead(405, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Method not allowed' }))
+      return
+    }
+
+    // Validate Origin header (MCP spec requirement — prevent DNS rebinding)
+    const origin = req.headers.origin || ''
+    if (origin && !ALLOWED_ORIGINS.has(origin.replace(/:\d+$/, ''))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message: 'Forbidden: invalid origin' }, id: null }))
+      return
+    }
+
+    // Read body (capped at 1MB)
+    const chunks: Buffer[] = []
+    let size = 0
+    const MAX_BODY = 1024 * 1024
+
+    for await (const chunk of req) {
+      size += (chunk as Buffer).length
+      if (size > MAX_BODY) {
+        res.writeHead(413, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message: 'Request too large' }, id: null }))
+        return
+      }
+      chunks.push(chunk as Buffer)
+    }
+
+    let msg: McpRequest
+    try {
+      msg = JSON.parse(Buffer.concat(chunks).toString('utf8')) as McpRequest
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' }, id: null }))
+      return
+    }
+
+    try {
+      const result = await handleMessage(msg, client)
+      if (result) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result))
+      } else {
+        // Notification — no response body
+        res.writeHead(202)
+        res.end()
+      }
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: msg.id ?? null
+      }))
+    }
   })
 
-  process.on('SIGTERM', async () => {
-    await client.close()
-    process.exit(0)
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`[hyperviking-mcp] HTTP transport listening on http://127.0.0.1:${port}/mcp`)
+    console.log(`[hyperviking-mcp] identity: ${IDENTITY || 'ephemeral'}`)
   })
+}
+
+/* -- Main --------------------------------------------------------------- */
+
+async function main (): Promise<void> {
+  const log = (msg: string) => process.stderr.write(`[hyperviking-mcp] ${msg}\n`)
+  log(`connecting to ${SERVER_KEY.slice(0, 12)}...${HTTP_MODE ? ` (HTTP mode, port ${HTTP_PORT})` : ''}`)
+
+  let client: HyperVikingClient
+  try {
+    client = await createClient({
+      name: IDENTITY || 'mcp',
+      ephemeral: !IDENTITY,
+      serverPublicKey: SERVER_KEY,
+      connectTimeout: 30000
+    })
+    log('connected')
+  } catch (err) {
+    log(`connection failed: ${(err as Error).message}`)
+    process.exit(1)
+  }
+
+  if (HTTP_MODE) {
+    startHttp(client, HTTP_PORT)
+  } else {
+    startStdio(client)
+  }
+
+  process.on('SIGINT', async () => { await client.close(); process.exit(0) })
+  process.on('SIGTERM', async () => { await client.close(); process.exit(0) })
 }
 
 main().catch((err: unknown) => {
