@@ -7,8 +7,9 @@ import { createClient, type HyperVikingClient } from './client.js'
 import { createInterface } from 'node:readline'
 
 const SERVER_KEY = process.argv[2]
+const IDENTITY = process.argv[3] // optional: persistent keypair name for RBAC servers
 if (!SERVER_KEY) {
-  process.stderr.write('Usage: hv mcp <server-public-key>\n')
+  process.stderr.write('Usage: hv mcp <server-public-key> [identity-name]\n')
   process.exit(1)
 }
 
@@ -419,8 +420,8 @@ async function main (): Promise<void> {
   let client: HyperVikingClient
   try {
     client = await createClient({
-      name: 'mcp',
-      ephemeral: true,
+      name: IDENTITY || 'mcp',
+      ephemeral: !IDENTITY, // ephemeral for local, persistent for RBAC servers
       serverPublicKey: SERVER_KEY,
       connectTimeout: 30000
     })
