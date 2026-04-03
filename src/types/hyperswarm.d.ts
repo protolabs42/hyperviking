@@ -15,6 +15,7 @@ declare module 'hyperswarm' {
 
   interface SwarmOptions {
     keyPair?: KeyPair
+    dht?: import('hyperdht')
     firewall?: (remotePublicKey: Buffer) => boolean
     maxConnections?: number
     maxPeers?: number

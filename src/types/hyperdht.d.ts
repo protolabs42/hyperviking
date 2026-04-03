@@ -9,6 +9,7 @@ declare module 'hyperdht' {
   interface DHTOptions {
     bootstrap?: Array<{ host: string; port: number }>
     keyPair?: KeyPair
+    localConnection?: boolean
   }
 
   class DHT {

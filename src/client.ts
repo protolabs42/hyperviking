@@ -1,4 +1,5 @@
 import Hyperswarm from 'hyperswarm'
+import DHT from 'hyperdht'
 import type { Duplex } from 'node:stream'
 import b4a from 'b4a'
 import { Decoder, request, type JsonRpcResponse } from './protocol.js'
@@ -42,7 +43,10 @@ export async function createClient (opts: ClientOptions): Promise<HyperVikingCli
     : serverPublicKey as Buffer
 
   const keyPair = getOrCreateKeypair(name)
-  const swarm = new Hyperswarm({ keyPair })
+  // Disable local connection optimization to prevent duplicate connection races
+  // when client and server run on the same machine
+  const dht = new DHT({ keyPair, localConnection: false })
+  const swarm = new Hyperswarm({ keyPair, dht })
 
   let conn: Duplex | null = null
   let decoder = new Decoder()
@@ -89,6 +93,7 @@ export async function createClient (opts: ClientOptions): Promise<HyperVikingCli
       })
 
       conn.on('error', (err: Error) => {
+        if (err.message === 'Duplicate connection') return
         console.error('[hyperviking-client] error:', err.message)
       })
 

@@ -151,13 +151,24 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
 
   const connections = new Set<Duplex>()
 
+  // Track connected peers for dedup (prevents duplicate connection churn on same-machine)
+  const connectedPeers = new Map<string, Duplex>()
+
   swarm.on('connection', (conn: Duplex, info: { publicKey: Buffer }) => {
     const remoteKey = b4a.toString(info.publicKey, 'hex')
     const member = useRbac ? getMember(roleList!, remoteKey) : null
     const peerName = member?.name ?? remoteKey.slice(0, 12)
 
+    // Application-level dedup: if this peer already has an active connection, close the duplicate
+    const existing = connectedPeers.get(remoteKey)
+    if (existing) {
+      conn.destroy()
+      return
+    }
+
     console.log(`[hyperviking] peer connected: ${peerName} (${remoteKey.slice(0, 12)}...)${member ? ` role=${member.role}` : ''}`)
     connections.add(conn)
+    connectedPeers.set(remoteKey, conn)
     if (useRbac) {
       peerConnections.set(remoteKey, conn)
       peerAbortControllers.set(remoteKey, new Set())
@@ -282,6 +293,8 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
     conn.on('close', () => {
       console.log(`[hyperviking] peer disconnected: ${peerName} (${remoteKey.slice(0, 12)}...)`)
       connections.delete(conn)
+      // Only remove from dedup map if this is the tracked connection (not a stale one)
+      if (connectedPeers.get(remoteKey) === conn) connectedPeers.delete(remoteKey)
       peerConnections.delete(remoteKey)
       // Abort any in-flight requests for this peer
       const acs = peerAbortControllers.get(remoteKey)
@@ -292,8 +305,11 @@ export async function createServer (opts: ServerOptions = {}): Promise<HyperViki
     })
 
     conn.on('error', (err: Error) => {
+      // Suppress Hyperswarm duplicate connection noise (expected on same-machine)
+      if (err.message === 'Duplicate connection') return
       console.error(`[hyperviking] connection error:`, err.message)
       connections.delete(conn)
+      if (connectedPeers.get(remoteKey) === conn) connectedPeers.delete(remoteKey)
       peerConnections.delete(remoteKey)
       // Abort in-flight requests on error (same as close handler)
       const acs = peerAbortControllers.get(remoteKey)
