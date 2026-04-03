@@ -417,12 +417,17 @@ async function handleMessage (msg: McpRequest, client: HyperVikingClient): Promi
   const { id, method, params } = msg
 
   switch (method) {
-    case 'initialize':
+    case 'initialize': {
+      // Echo back the client's protocol version if we support it (MCP spec requirement)
+      const SUPPORTED_VERSIONS = new Set(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'])
+      const clientVersion = (params as Record<string, unknown>)?.protocolVersion as string || '2024-11-05'
+      const negotiatedVersion = SUPPORTED_VERSIONS.has(clientVersion) ? clientVersion : '2024-11-05'
       return { jsonrpc: '2.0', id, result: {
-        protocolVersion: '2025-11-05',
+        protocolVersion: negotiatedVersion,
         capabilities: { tools: {} },
         serverInfo: { name: 'hyperviking', version: '0.5.0' }
       }}
+    }
 
     case 'notifications/initialized':
       return null // no response for notifications
@@ -504,15 +509,48 @@ function startStdio (client: HyperVikingClient): void {
 function startHttp (client: HyperVikingClient, port: number): void {
   const ALLOWED_ORIGINS = new Set(['http://localhost', 'http://127.0.0.1', 'null', ''])
 
+  // Track SSE connections for server→client notifications (future use)
+  const sseClients = new Set<ServerResponse>()
+
   const server = createHttpServer(async (req: IncomingMessage, res: ServerResponse) => {
-    // Only accept POST to /mcp
-    if (req.method !== 'POST' || (req.url !== '/mcp' && req.url !== '/')) {
-      // Also handle GET for health check
-      if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ status: 'ok', transport: 'http', identity: IDENTITY || 'ephemeral' }))
-        return
-      }
+    const path = req.url?.split('?')[0] || '/'
+
+    // CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': 'http://localhost',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age': '86400'
+      })
+      res.end()
+      return
+    }
+
+    // Health check
+    if (req.method === 'GET' && (path === '/health' || path === '/')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ status: 'ok', transport: 'http', identity: IDENTITY || 'ephemeral' }))
+      return
+    }
+
+    // SSE stream (GET /mcp) — MCP spec requires this for server→client messages
+    if (req.method === 'GET' && path === '/mcp') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': 'http://localhost'
+      })
+      // Send endpoint info so client knows where to POST
+      res.write(`event: endpoint\ndata: /mcp\n\n`)
+      sseClients.add(res)
+      req.on('close', () => sseClients.delete(res))
+      return // keep connection open
+    }
+
+    // POST /mcp — main request handler
+    if (req.method !== 'POST' || path !== '/mcp') {
       res.writeHead(405, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Method not allowed' }))
       return
@@ -550,18 +588,19 @@ function startHttp (client: HyperVikingClient, port: number): void {
       return
     }
 
+    const corsHeaders = { 'Access-Control-Allow-Origin': 'http://localhost' }
+
     try {
       const result = await handleMessage(msg, client)
       if (result) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders })
         res.end(JSON.stringify(result))
       } else {
-        // Notification — no response body
-        res.writeHead(202)
+        res.writeHead(202, corsHeaders)
         res.end()
       }
     } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders })
       res.end(JSON.stringify({
         jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: msg.id ?? null
       }))
