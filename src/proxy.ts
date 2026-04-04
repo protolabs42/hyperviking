@@ -94,6 +94,34 @@ function routeRequest (
   if (p === '/api/v1/observer/system') return rpc.call('ov.observer.system')
   if (p === '/api/v1/observer/vikingdb') return rpc.call('ov.observer.vikingdb')
 
+  // Write
+  if (p === '/api/v1/content/write' && method === 'POST') {
+    return rpc.call('ov.write', body as Record<string, unknown>)
+  }
+
+  // Stats
+  if (p === '/api/v1/stats/memories') {
+    return rpc.call('ov.stats.memories', { category: u.searchParams.get('category') || undefined })
+  }
+
+  // Session stats (must match before generic session paths)
+  const sessionStatsMatch = p.match(/^\/api\/v1\/stats\/sessions\/([^/]+)$/)
+  if (sessionStatsMatch) {
+    return rpc.call('ov.session.stats', { session_id: sessionStatsMatch[1] })
+  }
+
+  // Session used
+  const sessionUsedMatch = p.match(/^\/api\/v1\/sessions\/([^/]+)\/used$/)
+  if (sessionUsedMatch && method === 'POST') {
+    return rpc.call('ov.session.used', { session_id: sessionUsedMatch[1], ...body })
+  }
+
+  // Task status
+  const taskMatch = p.match(/^\/api\/v1\/tasks\/([^/]+)$/)
+  if (taskMatch) {
+    return rpc.call('ov.task.status', { task_id: taskMatch[1] })
+  }
+
   // Delete
   if (p === '/api/v1/fs' && method === 'DELETE') {
     return rpc.call('ov.delete', {

@@ -29,6 +29,11 @@ export interface HyperVikingClient {
   overview: (uri: string) => Promise<unknown>
   status: () => Promise<unknown>
   addResource: (path: string, targetUri?: string) => Promise<unknown>
+  write: (uri: string, content: string, opts?: { mode?: 'replace' | 'append', wait?: boolean, timeout?: number }) => Promise<unknown>
+  sessionUsed: (sessionId: string, contexts?: unknown[], skill?: string | null) => Promise<unknown>
+  taskStatus: (taskId: string) => Promise<unknown>
+  memoryStats: (category?: string) => Promise<unknown>
+  sessionStats: (sessionId: string) => Promise<unknown>
   close: () => Promise<void>
 }
 
@@ -137,6 +142,13 @@ export async function createClient (opts: ClientOptions): Promise<HyperVikingCli
     overview: (uri: string) => call('ov.overview', { uri }),
     status: () => call('ov.status'),
     addResource: (path: string, targetUri?: string) => call('ov.add-resource', { path, targetUri }),
+    write: (uri: string, content: string, opts: { mode?: 'replace' | 'append', wait?: boolean, timeout?: number } = {}) =>
+      call('ov.write', { uri, content, mode: opts.mode ?? 'replace', wait: opts.wait ?? false, timeout: opts.timeout }),
+    sessionUsed: (sessionId: string, contexts: unknown[] = [], skill: string | null = null) =>
+      call('ov.session.used', { session_id: sessionId, contexts, skill }),
+    taskStatus: (taskId: string) => call('ov.task.status', { task_id: taskId }),
+    memoryStats: (category?: string) => call('ov.stats.memories', { category }),
+    sessionStats: (sessionId: string) => call('ov.session.stats', { session_id: sessionId }),
     async close () {
       for (const [, p] of pending) {
         clearTimeout(p.timer)
