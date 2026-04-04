@@ -550,7 +550,12 @@ function startHttp (client: HyperVikingClient, port: number): void {
     }
 
     // POST /mcp — main request handler
-    if (req.method !== 'POST' || path !== '/mcp') {
+    if (path !== '/mcp') {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Not found' }))
+      return
+    }
+    if (req.method !== 'POST') {
       res.writeHead(405, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Method not allowed' }))
       return
